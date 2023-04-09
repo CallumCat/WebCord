@@ -43,6 +43,8 @@ import { styles } from "../main/modules/extensions";
 import { parseArgs, ParseArgsConfig, stripVTControlCharacters, debug } from "util";
 import { parseArgs as parseArgsPolyfill } from "@pkgjs/parseargs";
 
+import { pw } from "./modules/node-pipewire-provider"
+
 const argvConfig = Object.freeze(({
   options: Object.freeze({
     /**
@@ -123,6 +125,13 @@ let startHidden = false;
  * **Might bring undesirable consequences on unsupported platforms**.
  */
 let screenShareAudio = false;
+
+if (pw !== null) {
+  // @ts-expect-error - node-pipewire may not be installed
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+  pw.createPwThread(argv.values.verbose === true);
+  screenShareAudio = true;
+}
 
 const userAgent: Partial<{
   replace: Parameters<typeof getUserAgent>[2];

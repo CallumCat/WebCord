@@ -26,14 +26,65 @@ import { commonCatches } from "../modules/error";
 
 import type { PartialRecursive } from "../../common/global";
 import { nativeImage } from "electron/common";
+
+// eslint-disable-next-line
+// @ts-ignore - This will ignore the error if pipewire isn't installed
+import type { PipewireLink, PipewireNode, PipewirePort } from "node-pipewire/build/types";
+
 import { lt } from "semver";
+import { pw } from "../../common/modules/node-pipewire-provider";
+
+type UndefinedOrT<T> = T extends any ? undefined : T;
 
 interface MainWindowFlags {
   startHidden: boolean;
   screenShareAudio: boolean;
 }
 
+interface AudioInformation {
+  selectedAudioNodes: string[] | null;
+}
+
+const blacklistInputNodes: number[] = [];
+
+// eslint-disable-next-line import/no-unused-modules
 export default function createMainWindow(flags:MainWindowFlags): BrowserWindow {
+  
+  let pipewireAudio = false;
+  let testAudioAttempts = 0;
+  
+  const testAudioInterval: NodeJS.Timeout | null = pw === null ? null : setInterval(() => {
+    // get the actual input nodes from pipewire.
+    // @ts-expect-error - node-pipewire may not be installed
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+    const inputNodes = pw.getInputNodes();
+    
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    if (inputNodes.length > 0) {
+      //If the user is using a chromium based browser, and is using a microphone, it will be in the list of input nodes.
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+      const chromiumInputNodes = inputNodes.filter((node: { name: string }) => node.name === "Chromium");
+    
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      if (chromiumInputNodes.length > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
+        chromiumInputNodes.forEach((node: { id: number }) => {
+          blacklistInputNodes.push(node.id);
+        });
+      }
+      flags.screenShareAudio = true;
+      pipewireAudio = true;
+      // eslint-disable-next-line @typescript-eslint/no-extra-non-null-assertion
+      clearInterval(testAudioInterval!!);
+    } else{
+      testAudioAttempts++;
+      if (testAudioAttempts === 5) {
+        // eslint-disable-next-line @typescript-eslint/no-extra-non-null-assertion
+        clearInterval(testAudioInterval!!);
+      }
+    }
+  }, 1000);
+    
   const l10nStrings = new L10N().client;
 
   const internalWindowEvents = new EventEmitter();
@@ -476,6 +527,52 @@ export default function createMainWindow(flags:MainWindowFlags): BrowserWindow {
   if(getBuildInfo().type === "devel")
     void loadChromiumExtensions(win.webContents.session);
 
+  ipcMain.handle("getActualSources", async () => {
+    const lock = !app.commandLine.getSwitchValue("enable-features")
+      .includes("WebRTCPipeWireCapturer") ||
+      process.env["XDG_SESSION_TYPE"] !== "wayland" ||
+      process.platform === "win32";
+  
+    const sources = lock || lt(process.versions.electron,"22.0.0") ?
+    // Use desktop capturer on Electron 22 downwards or X11 systems
+      desktopCapturer.getSources({
+        types: lock ? ["screen", "window"] : ["screen"],
+        fetchWindowIcons: lock
+        // Workaround #328: Segfault on `desktopCapturer.getSources()` since Electron 22
+      }) : Promise.resolve([{
+        id: "screen:1:0",
+        appIcon: nativeImage.createEmpty(),
+        display_id: "",
+        name: "Entire Screen",
+        thumbnail: nativeImage.createEmpty()
+      } satisfies Electron.DesktopCapturerSource]);
+
+    if(pipewireAudio && pw !== null) {
+      // @ts-expect-error - node-pipewire may not be installed
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+      const outputNodesName = pw.getOutputNodesName();
+
+      // @ts-expect-error - node-pipewire may not be installed
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+      const chromiumInputNodes = pw.getInputNodes().filter((node: { name: string; id: number }) => node.name.startsWith("Chromium") && !blacklistInputNodes.includes(node.id));
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return
+      blacklistInputNodes.push(...chromiumInputNodes.map((node: { id: any }) => node.id));
+
+      // Filter outputNodesName to remove the repeated names
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+      const outputNodesNameFiltered = outputNodesName.filter((node: any, index: any) => {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
+        return outputNodesName.indexOf(node) === index;
+      }).sort();
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+      return [await sources, flags.screenShareAudio, outputNodesNameFiltered];
+    }
+
+    return [await sources, flags.screenShareAudio];
+  });
+
   // IPC events validated by secret "API" key and sender frame.
   internalWindowEvents.on("api", (safeApi:string) => {
     /** Determines whenever another request to desktopCapturer is processed. */
@@ -496,12 +593,13 @@ export default function createMainWindow(flags:MainWindowFlags): BrowserWindow {
           .includes("WebRTCPipeWireCapturer") ||
           process.env["XDG_SESSION_TYPE"] !== "wayland" ||
           process.platform === "win32";
+        
         const sources = lock || lt(process.versions.electron,"22.0.0") ?
-          // Use desktop capturer on Electron 22 downwards or X11 systems
+        // Use desktop capturer on Electron 22 downwards or X11 systems
           desktopCapturer.getSources({
             types: lock ? ["screen", "window"] : ["screen"],
             fetchWindowIcons: lock
-          // Workaround #328: Segfault on `desktopCapturer.getSources()` since Electron 22
+            // Workaround #328: Segfault on `desktopCapturer.getSources()` since Electron 22
           }) : Promise.resolve([{
             id: "screen:1:0",
             appIcon: nativeImage.createEmpty(),
@@ -509,62 +607,152 @@ export default function createMainWindow(flags:MainWindowFlags): BrowserWindow {
             name: "Entire Screen",
             thumbnail: nativeImage.createEmpty()
           } satisfies Electron.DesktopCapturerSource]);
-        if(lock) {
-          const view = new BrowserView({
-            webPreferences: {
-              preload: resolve(app.getAppPath(), "app/code/renderer/preload/capturer.js"),
-              nodeIntegration: false,
-              contextIsolation: true,
-              sandbox: false,
-              enableWebSQL: false,
-              webgl: false,
-              autoplayPolicy: "user-gesture-required"
-            }
-          });
+
+        let capturerJS = "app/code/renderer/preload/capturer.js";
+        let capturerHTML = "sources/assets/web/html/capturer.html";
+
+        if (pipewireAudio) {
+          capturerJS = "app/code/renderer/preload/pipewire-capturer.js";
+          capturerHTML = "sources/assets/web/html/pipewire-capturer.html";
+        }
+        
+        const view = new BrowserView({
+          webPreferences: {
+            preload: resolve(app.getAppPath(), capturerJS),
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: false,
+            enableWebSQL: false,
+            webgl: false,
+            autoplayPolicy: "user-gesture-required"
+          }
+        });
+        
+        if (!pipewireAudio){
           ipcMain.handleOnce("getDesktopCapturerSources", async (event) => {
             if(event.sender === view.webContents)
               return [await sources, flags.screenShareAudio];
             else
               return null;
           });
-          const autoResize = () => setImmediate(() => view.setBounds({
-            ...win.getBounds(),
-            x:0,
-            y:0,
-          }));
-          ipcMain.handleOnce("capturer-get-settings", () => {
-            return appConfig.value.screenShareStore;
-          });
-          ipcMain.once("closeCapturerView", (_event,data:unknown) => {
-            win.removeBrowserView(view);
-            view.webContents.delete();
-            win.removeListener("resize", autoResize);
-            ipcMain.removeHandler("capturer-get-settings");
-            resolvePromise(data);
-            lock = false;
-          });
-          win.setBrowserView(view);
-          void view.webContents.loadFile(resolve(app.getAppPath(), "sources/assets/web/html/capturer.html"));
-          view.webContents.once("did-finish-load", () => {
-            autoResize();
-            win.on("resize", autoResize);
-          });
         } else {
-          sources.then(sources => resolvePromise({
-            audio: flags.screenShareAudio ? {
-              mandatory: {
-                chromeMediaSource: "desktop",
-                chromeMediaSourceId: sources[0]?.id
-              }
-            } : false,
-            video: {
-              mandatory: {
-                chromeMediaSource: "desktop",
-                chromeMediaSourceId: sources[0]?.id
-              }
-            }
-          })).catch(error => console.error(error));
+          if(pw !== null) {
+            ipcMain.handleOnce("getDesktopCapturerSources", async (event) => {
+              // @ts-expect-error - node-pipewire may not be installed
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+              const outputNodesName = pw.getOutputNodesName();
+
+              // @ts-expect-error - node-pipewire may not be installed
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+              const chromiumInputNodes = pw.getInputNodes().filter((node: { name: string; id: number }) => node.name.startsWith("Chromium") && !blacklistInputNodes.includes(node.id));
+
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return
+              blacklistInputNodes.push(...chromiumInputNodes.map((node: { id: any }) => node.id));
+
+              // Filter outputNodesName to remove the repeated names
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+              const outputNodesNameFiltered = outputNodesName.filter((node: any, index: any) => {
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
+                return outputNodesName.indexOf(node) === index;
+              }).sort();
+
+              if(event.sender === view.webContents)
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+                return [await sources, flags.screenShareAudio, outputNodesNameFiltered];
+              else
+                return null;
+            });
+          }
+
         }
+        const autoResize = () => setImmediate(() => view.setBounds({
+          ...win.getBounds(),
+          x:0,
+          y:0,
+        }));
+        ipcMain.handleOnce("capturer-get-settings", () => {
+          return appConfig.value.screenShareStore;
+        });
+        ipcMain.once("closeCapturerView", (_event, data: unknown, audioInfo?: AudioInformation) => {
+          win.removeBrowserView(view);
+          view.webContents.delete();
+          win.removeListener("resize", autoResize);
+          ipcMain.removeHandler("capturer-get-settings");
+
+
+          if(audioInfo?.selectedAudioNodes){
+            const selectedAudioNodes = audioInfo.selectedAudioNodes;
+
+            if (selectedAudioNodes.length > 0) {
+              // eslint-disable-next-line @typescript-eslint/no-floating-promises
+              if(pw !== null) (async () => {
+                let screenShareNode: UndefinedOrT<PipewireNode> = undefined;
+                try {
+                  // @ts-expect-error - node-pipewire may not be installed
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+                  screenShareNode = await pw.waitForNewNode("Chromium", "Input");
+                } catch (error) {
+                  console.log("Error waiting for new node");
+                  console.error(error);
+                }
+
+                if (screenShareNode !== undefined) {
+                  // @ts-expect-error - node-pipewire may not be installed
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+                  const screenSharePorts = screenShareNode.ports.filter((port: PipewirePort) => port.direction === "Input");
+                  
+                  // unlink mic from the screen-share (if it was linked, in my case it was)
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  if (screenSharePorts.length > 0) {
+                    // @ts-expect-error - node-pipewire may not be installed
+                    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+                    const links = pw.getLinks();
+                    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+                    screenSharePorts.forEach((port: PipewirePort) => {
+                      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+                      const micLink = links.find((link: PipewireLink) =>  port.id === link.input_port_id);
+                      // @ts-expect-error - node-pipewire may not be installed
+                      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+                      if (micLink !== undefined) pw.unlinkPorts(port.id, micLink.output_port_id);
+                    });
+                  }
+
+                  // send to PW the name of selected audio nodes with the id of the new chromium input nodes
+                  const interval = setInterval(() => {
+                    // check if the port of the screenShareNode exits
+                    // @ts-expect-error - node-pipewire may not be installed
+                    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+                    const targetNode = pw.getInputNodes().find((node: PipewireNode) => screenShareNode?.id === node.id);
+                    if (targetNode !== undefined) {
+                      try {
+                        selectedAudioNodes.forEach((nodeName) => {
+                          // link the the selected audio nodes to the target node
+                          // @ts-expect-error - node-pipewire may not be installed
+                          // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+                          pw.linkNodesNameToId(nodeName, targetNode.id);
+                        });
+                      } catch (error) {
+                        console.log("Error linking nodes");
+                        console.error(error);
+                      }
+                    } else {
+                      clearInterval(interval);
+                    }
+                  }, 1000);
+                }
+              })();
+            }
+          }
+        
+          resolvePromise(data);
+          lock = false;
+        });
+        win.setBrowserView(view);
+        void view.webContents.loadFile(resolve(app.getAppPath(), capturerHTML));
+        view.webContents.once("did-finish-load", () => {
+          autoResize();
+          win.on("resize", autoResize);
+        });
         return;
       });
     });

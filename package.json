@@ -83,6 +83,9 @@
     "tslib": "^2.3.1",
     "twemoji-colr-font": "^14.0.2"
   },
+  "optionalDependencies": {
+    "node-pipewire": "^1.0.14"
+  },
   "config": {
     "forge": "./app/code/build/forge.js"
   },
