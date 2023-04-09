@@ -68,7 +68,7 @@ export const knownInstancesList = Object.freeze([
   ["Discord Canary",           new URL("https://canary.discord.com/app"),    true ],
   ["Discord Public Test Beta", new URL("https://ptb.discord.com/app"),       true ],
   ["Fosscord",                 new URL("https://dev.fosscord.com/app"),     false ],
-  ["Fosscord Staging",         new URL("https://staging.fosscord.com/app"),  true ],
+  ["Fosscord Staging",         new URL("https://fosscord.afolf.com/app"),  true ],
   ["Freecord",                 new URL("https://app.freecord.ir/app"),       true ]
 ] as const) satisfies readonly (readonly [ name: string, url: URL, active: boolean ])[];
 
