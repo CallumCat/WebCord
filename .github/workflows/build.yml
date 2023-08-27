@@ -38,7 +38,7 @@ jobs:
 
     name: '${{ matrix.name }} (${{ matrix.build }})'
     runs-on: ${{ matrix.runner }}
-    needs: ['test']
+    needs: []
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3
